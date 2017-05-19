@@ -1,11 +1,6 @@
 import React from 'react'
 import ReactDOM from 'react-dom'
 
-import {MainContainer} from './Containers/MainContainer'
+import App from './Containers/App'
 
-ReactDOM.render(
-  <div className="parent-div container-fluid">
-    <MainContainer />
-  </div>,
-  document.getElementById('root')
-);
+ReactDOM.render(<App />, document.getElementById('root'));

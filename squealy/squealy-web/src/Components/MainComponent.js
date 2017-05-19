@@ -1,88 +1,85 @@
-import React, {Component} from 'react'
-
+import React, { Component } from 'react'
+import NavHeader from './NavHeader'
 import SideMenu from './SideMenu'
-import { SQLEditor } from './SQLEditor'
-import { MOCK_DATA, COLUMN_META_DATA } from './../mockData'
-import { APIHeader } from './NavHeader'
-import ApiParams from './ApiParamsComponent'
-import FormatSelector from './FormatSelector'
-import Transformations from './Transformations'
-import UrlInputBox from './ApiUrlInputBox'
-import ResponseSection from './ResponseSection'
-
+import ApiDesignView from './ApiDesignView'
 
 export default class MainComponent extends Component {
-
-  render () {
+  
+  render() {
     const {
+      charts,
+      chartAdditionHandler,
+      chartDeletionHandler,
+      chartSelectionHandler,
+      selectedChartIndex,
+      googleDefined,
+      selectedChartChangeHandler,
       onHandleTestButton,
-      onChangeApiDefinition,
-      apiDefinition,
-      selectedApiIndex,
-      testData,
-      apiDeletionHandler,
-      apiAdditionHandler,
-      apiSelectionHandler,
-      exportConfigAsYaml,
-      onChangeTestData,
-      handleEditParam,
-      dbUpdationHandler
+      parameters,
+      savedStatus,
+      saveInProgress,
+      userInfo,
+      updateViewMode,
+      currentChartMode,
+      databases,
+      filters,
+      filterAdditionHandler,
+      filterDeletionHandler,
+      selectedFilterChangeHandler,
+      selectedFilterIndex,
+      filterSelectionHandler,
+      onHandleTestFilterButton,
+      onHandleVisualizationTab
     } = this.props
-    let selectedAPIDefinition = apiDefinition[selectedApiIndex]
-
-    let selectedTestData = testData[selectedApiIndex], responseElem
     return (
-      <div className="row main-container">
-        <div className="col-md-3">
-          <SideMenu
-            apiParams={selectedTestData.apiParams}
-            onChangeTestData={onChangeTestData}
-            selectedApiDefinition={selectedAPIDefinition}
-            dbUpdationHandler={dbUpdationHandler}
-          />
-        </div>
-        <div className="col-md-9 editor-container">
-          <UrlInputBox
-              onChangeApiDefinition={onChangeApiDefinition}
-              apiDefinition={apiDefinition}
-              selectedApiIndex={selectedApiIndex}/>
-          <ApiParams
-            handleEditParam={handleEditParam}
-            selectedApiDefinition={selectedAPIDefinition}
-            selectedApiIndex={selectedApiIndex}
-            onChangeTestData={onChangeTestData}
-            onChangeApiDefinition={onChangeApiDefinition}
-            apiParams={selectedTestData.apiParams}/>
-          <SQLEditor
-            onChangeApiDefinition={onChangeApiDefinition}
-            sqlQuery={selectedAPIDefinition.sqlQuery}
-            selectedApiIndex={selectedApiIndex}
-            onChangeTestData={onChangeTestData}
-            apiParams={selectedTestData.apiParams}/>
-          <div className="api-section">
-            <div className="api-btn-wrapper">
-              <button onClick={(e) => onHandleTestButton(e)}
-                      className="btn btn-info hidash-btn">
-                Run Query
-              </button>
-            </div>
-            <Transformations
-              onChangeApiDefinition={onChangeApiDefinition}
-              selectedApiDefinition={selectedAPIDefinition}
-              apiResponse={selectedTestData}
-            />
-            <div className="response-format">
-              <FormatSelector
-                selectedFormat={selectedTestData.selectedFormat}
-                apiResponseGetter={onHandleTestButton}
-                selectedApiIndex={selectedApiIndex}
-                />
-            </div>
+      <div className="full-height">
+        <NavHeader savedStatus={savedStatus} saveInProgress={saveInProgress} userInfo={userInfo}/>
+        <div className="row side-menu-container">
+          <div className="col-md-3 side-menu-parent">
+            <SideMenu 
+              userInfo={userInfo}
+              chartAdditionHandler={chartAdditionHandler} 
+              charts={charts}
+              selectedChartIndex={selectedChartIndex} 
+              chartSelectionHandler={chartSelectionHandler}
+              chartDeletionHandler={chartDeletionHandler}
+              selectedChartChangeHandler={selectedChartChangeHandler}
+              databases={databases}
+              filters={filters}
+              filterAdditionHandler={filterAdditionHandler}
+              filterDeletionHandler={filterDeletionHandler}
+              selectedFilterChangeHandler={selectedFilterChangeHandler}
+              selectedFilterIndex={selectedFilterIndex}
+              filterSelectionHandler={filterSelectionHandler}
+              />
           </div>
-          <ResponseSection
-            selectedTestData={selectedTestData}
-            selectedAPIDefinition={selectedAPIDefinition}
-            onChangeApiDefinition={onChangeApiDefinition}/>
+          <div className="col-md-9 api-design-container">
+            {(charts.length)?
+              <ApiDesignView
+                userInfo={userInfo}
+                selectedChartIndex={selectedChartIndex}
+                selectedFilterIndex={selectedFilterIndex}
+                chart={selectedChartIndex !== null ? charts[selectedChartIndex] : []}
+                selectedChartChangeHandler={selectedChartChangeHandler}
+                selectedChartIndex={selectedChartIndex}
+                googleDefined={googleDefined}
+                onHandleTestButton={onHandleTestButton}
+                updateViewMode={updateViewMode}
+                currentChartMode={currentChartMode}
+                databases={databases}
+                selectedFilterChangeHandler={selectedFilterChangeHandler}
+                filters={filters}
+                onHandleTestFilterButton={onHandleTestFilterButton}
+                onHandleVisualizationTab={onHandleVisualizationTab}
+              />
+            : <div className='full-height no-charts'>
+                <div className='col-md-6 col-md-offset-3 instructions'>
+                  <h2> No charts to show. </h2>
+                  <h6>Add a new chart if you see the plus icon in the side menu, or ask your administrator to add one for you.</h6>
+                </div>
+              </div>
+            }
+          </div>
         </div>
       </div>
     )

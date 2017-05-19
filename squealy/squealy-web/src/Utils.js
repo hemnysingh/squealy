@@ -1,6 +1,7 @@
-import { YAML_INDENTATION, RESPONSE_FORMATS } from './Constant'
-import FileSaver from 'filesaver.js-npm'
-import jsyaml from 'js-yaml'
+import {
+  GOOGLE_CHART_TYPE_OPTIONS
+} from './Constant'
+
 /*!*************************************************************************
 [Utils.js]
 *****************************************************************************/
@@ -19,18 +20,22 @@ import jsyaml from 'js-yaml'
 export function postApiRequest(uri, data, onSuccessCallback,
                                onFailureCallback, callbackParmas) {
   data = jsonStringfy(data)
-  postData(uri, data, 'POST', onSuccessCallback, onFailureCallback, callbackParmas)
+  apiCall(uri, data, 'POST', onSuccessCallback, onFailureCallback, callbackParmas)
 }
 
+export function baseUrl() {
+  return window.location.origin + '/'
+}
 /**
  * @module Utils
  * @params {String} Url - Provides the post url
  * @params {Object} data - The object that represents the contents of the
  * request being sent
  */
-export function getApiRequest(uri, id, onSuccessCallback, onFailureCallback,
-                              interval) {
-  postData(uri, id, 'GET', onSuccessCallback, onFailureCallback, interval)
+export function getApiRequest(uri, data, onSuccessCallback, onFailureCallback,
+  callbackParmas, interval) {
+  let payload = data ? {payload: jsonStringfy(data)} : data
+  apiCall(uri, payload, 'GET', onSuccessCallback, onFailureCallback, callbackParmas,  interval)
 }
 
 /**
@@ -56,7 +61,7 @@ function jsonStringfy(data) {
  * @params {Function} onFailure - Failure callback function
  * TODO: Need to add a callback function on success and failure
  */
-function postData(uri, data, methodType, onSuccess, onFailure, callbackParmas=null) {
+export function apiCall(uri, data, methodType, onSuccess, onFailure, callbackParmas=null) {
   const csrftoken = getCookie('csrftoken');
   $.ajaxSetup({
     beforeSend: function(xhr, settings) {
@@ -108,165 +113,103 @@ function getCookie(name) {
 
 export function getEmptyApiDefinition() {
   return {
-    apiName: 'Untitled API 0',
-    open: true,
-    urlName: '',
-    sqlQuery: '',
-    paramDefinition: [],
+    id: null,
+    name: 'first chart',
+    url: 'first-chart',
+    query: '',
+    parameters: [],
+    testParameters: {},
     validations: [],
     transformations: [],
-    selectedTransformations: [],
-    columns: {},
-    selectedDB: null
+    transpose: false,
+    type: 'ColumnChart',
+    options: {},
+    chartData: {},
+    pivotColumn: undefined,
+    metric: undefined,
+    columnsToMerge: undefined,
+    newColumnName: '',
+    apiErrorMsg: null,
+    database: null
   }
 }
 
-export function getDefaultApiDefinition(apiIndex) {
+export function getEmptyFilterDefinition() {
   return {
-    apiName: `Untitled API ${apiIndex}`,
-    open: true,
-    urlName: '',
-    sqlQuery: '',
-    paramDefinition: [],
-    validations: [],
-    transformations: [],
-    selectedTransformations: [],
-    columns: {},
-    selectedDB: null
+    id: null,
+    name: '',
+    url: '',
+    database: '',
+    query: '',
+    apiErrorMsg: '',
+    filterData: [],
+    parameters: []
   }
 }
 
-export function getEmptyTestData() {
+
+export function getEmptyWidgetDefinition() {
   return {
-    apiSuccess: false,
-    apiError: false,
-    apiResponse: [],
-    apiParams: {},
-    selectedFormat: RESPONSE_FORMATS.table.value
+    width: 4,
+    height: 20,
+    top: 7,
+    left: 1,
+    title: 'Chart Title',
+    chartType: GOOGLE_CHART_TYPE_OPTIONS[7].value,
+    chartStyles: {},
+    api_url: '',
+    apiParams: {}
   }
 }
 
-/**
- * [objectToYaml: covert json object to yaml]
- * /
- * @param  {[object]} obj [provide api definition]
- * @return {[yaml]}     [return api definition as yaml]
- */
-export function objectToYaml(obj) {
-  return jsyaml.dump(obj, {indent: YAML_INDENTATION})
-}
-
-/**
- * [YamlFileToJsonObj: Read data from file and covert yaml to json object]
- * /
- * @param {[file]} fileName [provide yaml file name that we need to convert as JSON object]
- * @param {[object]}  [return file data as json object]
- */
-export function YamlFileToJsonObj(fileName) {
-  return jsyaml.load(fileName)
-}
-
-/**
- * [yamlObjToJson convert yaml to json objcet ]
- * @param  {yaml} yaml [yaml object that we need to convert as json object]
- * @return {object}      [return data as json object]
- */
-export function yamlObjToJson(yaml) {
-  return jsyaml.load(yaml)
-}
-
-/**
- * [exportFile write data in a file and save it on local disk]
- * @param  {string/object/yaml} data        [provides the data that we need to write in file]
- * @param  {[string]} contentType [data type]
- * @param  {[string]} fileName    [name of the file that we are writing]
- */
-export function exportFile(data, contentType) {
-  let blob = new Blob([], {type: contentType})
-  for (let index in data) {
-      blob = new Blob([blob,  '---\n', formatApiDataToYaml(data[index],index), '\n\n'], {type: contentType})
+export function getEmptyUserInfo() {
+  return {
+    'first_name': '',
+    'last_name': '',
+    'name': 'none',
+    'email': '',
+    'can_add_chart': false,
+    'can_delete_chart': false
   }
-  return blob
 }
 
-export function saveBlobToFile(data, file) {
-  FileSaver.saveAs(data, file)
+export function getEmptyParamDefinition(apiIndex) {
+  return {
+    name: '',
+    order: 0,
+    type: 1,
+    data_type: 'string',
+    mandatory: false,
+    default_value: '',
+    kwargs: {},
+    test_value: '',
+    dropdown_api: '',
+    is_parameterized: false
+  }
 }
 
-export function setDataInLocalStorage(key, data) {
-  localStorage.setItem(key, JSON.stringify(data))
-}
 
-export function getDataFromLocalStorage(key) {
-  return JSON.parse(localStorage.getItem(key))
-}
-
-
-export function preProcessResponse(response) {
-  let processedResponse = {data: [], columns: []}
-  response.columns.map((column) => {
-    processedResponse.columns.push({
-      accessor: column.name,
-      header: column.name
+function processParamDef(definitions) {
+  let appliedDef = {}
+  if (definitions.length) {
+    definitions.map((data) => {
+      appliedDef[data.name] = {
+        type: data.type,
+        optional: data.optional,
+        default_value: data.default_value,
+        isParamDefCustom: data.isParamDefCustom
+      }
+      if (data.hasOwnProperty('kwargs')) {
+        appliedDef[data.name].kwargs = data.kwargs
+      }
     })
-  })
-  response.data.map((row) => {
-    let processedRow = {sortable: false}
-    processedResponse.columns.map((column, index) => {
-      processedRow[column.accessor] = row[index]
-    })
-    processedResponse.data.push(processedRow)
-  })
-  return processedResponse
-}
-
-export function saveYamlOnServer(data) {
-  let yamlArray = []
-  for (let index in data) {
-     yamlArray.push(formattedData(data[index],index))
   }
-  return yamlArray
-}
-
-function formatApiDataToYaml(data, index) {
-  let formattedData = {
-    'id': index+1,
-    'name': data.apiName,
-    'url': data.urlName,
-    'parameters': data.paramDefinition,
-    // 'access_control':data.access_control,
-    'validations': data.validations,
-    'query': data.sqlQuery,
-    'transformations': data.transformations,
-    'format': data.format
-  }
-  if(data.columns) {
-    formattedData.columns = data.columns
-  }
-  return jsyaml.dump(formattedData, {indent: YAML_INDENTATION})
-}
-
-function formattedData(data, index) {
-  let formattedData = {
-    'id': index+1,
-    'name': data.apiName,
-    'url': data.urlName,
-    'parameters': data.paramDefinition,
-    // 'access_control':data.access_control,
-    'validations': data.validations,
-    'query': data.sqlQuery,
-    'transformations': data.transformations,
-    'format': data.format
-  }
-  if(data.columns) {
-    formattedData.columns = data.columns
-  }
-  return formattedData
+  return appliedDef
 }
 
 
 // The following function loads the google charts JS files
-export function googleChartLoader(version, packages) {
+export function googleChartLoader(onSuccess, version, packages) {
   var options = {
     dataType: 'script',
     cache: true,
@@ -274,7 +217,8 @@ export function googleChartLoader(version, packages) {
   };
   jQuery.ajax(options).done(function(){
     google.charts.load(version || 'current', {
-      packages: packages || ['corechart']
+      packages: packages || ['corechart'],
+      'callback': onSuccess
     });
   });
 }
@@ -296,7 +240,7 @@ function execRegexGroupedMulValues(regex, text, result) {
 
 
 
-export function fetchApiParamsFromQuery(text) {
+export function fetchQueryParamsFromQuery(text) {
   let regExpForParams = /{{\s*params\.([^\s}%]+)\s*}}/g,
       regExpForExp = /{%[^(%})]*params\.([^\s}%]+)[^({%)]*%}/g,
       paramsArray = []
@@ -318,4 +262,69 @@ export function fetchSessionParamsFromQuery(text) {
   paramsArray = execRegexGroupedMulValues(regExpForExp, text, paramsArray)
 
   return paramsArray
+}
+
+export function isJsonString(str) {
+    try {
+        JSON.parse(str);
+    } catch (e) {
+        return false;
+    }
+    return true;
+}
+
+
+export function checkObjectAlreadyExists (data, keyName, value) {
+  for (let i = 0; i < data.length; i++) {
+    if (data[i].hasOwnProperty(keyName) && data[i][keyName] === value) {
+      return i
+    }
+  }
+  return -1
+}
+
+export function formatTestParameters (paramDefintion, key, valueKey) {
+  let testParams = {
+    params: {},
+    user: {}
+  }
+
+  paramDefintion.map((param) => {
+    if (param.type === 2) {
+      testParams.user[param[key]] = param[valueKey]
+    } else {
+      testParams.params[param[key]] = param[valueKey]
+    }
+  })
+  return testParams
+}
+
+export function getUrlParams() {
+  let pageURL = decodeURIComponent(window.location.search.substring(1)),
+    parameterName,
+    i
+  if(pageURL === '') {
+    return null
+  }
+  return JSON.parse('{"' + decodeURI(pageURL).replace(/"/g, '\\"').replace(/&/g, '","').replace(/=/g,'":"') + '"}')
+}
+
+export function setUrlParams(newParams) {
+  let queryString = Object.keys(newParams).map(function(k) {
+    return encodeURIComponent(k) + '=' + encodeURIComponent(newParams[k])
+  }).join('&')
+  var newurl = window.location.protocol + '//' + window.location.host + window.location.pathname + '?' + queryString;
+  window.history.replaceState({path: newurl},'',newurl);
+}
+
+export function formatForDropdown(data) {
+  let result = []
+
+  data.map((val) => {
+    result.push({
+      label: val[0],
+      value: val[0]
+    })
+  })
+  return result
 }

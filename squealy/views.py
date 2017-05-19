@@ -1,243 +1,187 @@
-import importlib
+import os
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from jinjasql import JinjaSql
+from django.contrib.auth.models import Permission
+from django.contrib.contenttypes.models import ContentType
 from django.db import connections
+from django.db.utils import IntegrityError
 from django.shortcuts import render
-from rest_framework import status
+from django.db import transaction
 from django.conf import settings
 
-from squealy.exceptions import RequiredParameterMissingException
-from squealy.transformers import *
-from squealy.formatters import *
-from squealy.parameters import *
-from .table import Table, Column
-from pydoc import locate
-import yaml
-import os
-import json
-from django.core.files import File
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication
+from rest_framework.decorators import permission_classes, api_view
+from rest_framework.permissions import IsAdminUser, BasePermission
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework import status
 
-jinjasql = JinjaSql()
+from pyathenajdbc import connect
+
+from squealy.constants import SQL_WRITE_BLACKLIST
+from squealy.jinjasql_loader import configure_jinjasql
+
+from squealy.serializers import ChartSerializer, FilterSerializer
+from .exceptions import RequiredParameterMissingException,\
+                        ChartNotFoundException, MalformedChartDataException, \
+                        TransformationException, DatabaseWriteException, DuplicateUrlException,\
+                        FilterNotFoundException, DatabaseConfigurationException,\
+                        SelectedDatabaseException
+from .transformers import *
+from .formatters import *
+from .parameters import *
+from .table import Table
+from .models import Chart, Transformation, Validation, Parameter, \
+    ScheduledReport, ReportParameter, ReportRecipient, Filter, FilterParameter
+from .validators import run_validation
+from datetime import datetime, timedelta
+import json, ast
+
+
+jinjasql = configure_jinjasql()
 
 
 class DatabaseView(APIView):
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
 
     def get(self, request, *args, **kwargs):
         try:
             database_response = []
             database = settings.DATABASES
+
             for db in database:
-                database_response.append({
-                  'value': db,
-                  'label': database[db]['NAME']
-                })
-            return Response({'database': database_response})
-        except Exception as e:
-            return Response({'error': str(e)}, status.HTTP_400_BAD_REQUEST)
-
-    def post(self, request, *args, **kwargs):
-        connection_name = request.data.get('database', None)
-        conn = connections[connection_name['value']]
-        table = request.data.get('table', None)
-        if table:
-            query = 'Desc {}'.format(table['value'])
-            with conn.cursor() as cursor:
-                cursor.execute(query)
-                column_metadata = []
-                for meta in cursor:
-                    column_metadata.append({
-                        'column': meta[0],
-                        'type': meta[1]
+                if db != 'default':
+                    database_response.append({
+                      'value': db,
+                      'label': database[db]['NAME']
                     })
-            return Response({'schema': column_metadata})
-        else:
-            with conn.cursor() as cursor:
-                cursor.execute('Show tables;')
-                tables = []
-                for table_names in cursor:
-                    tables.append({
-                                   'value': str(table_names[0]),
-                                   'label': str(table_names[0])
-                                })
-            return Response({'tables': tables})
-
-
-class YamlGeneratorView(APIView):
-
-    def post(self, request, *args, **kwargs):
-        try:
-            #FIX ME:: Remove Hardcoded Values
-            json_data = json.loads(request.body).get('yamlData')
-            directory = os.path.join(os.path.dirname(os.path.dirname(__file__)),'yaml/')
-            if not os.path.exists(directory):
-                os.makedirs(directory)
-            with open(directory+'api.yaml','w+') as f:
-                myfile = File(f)
-                myfile.write(yaml.safe_dump_all(json_data, explicit_start=True))
-            f.close()
-            myfile.close()    
-            return Response({}, status.HTTP_200_OK)
-        except  Exception as e:
-            return Response({'error': str(e)}, status.HTTP_400_BAD_REQUEST)    
-
-
-class SqlApiView(APIView):
-    # validations = []
-    # transformations = []
-    # formatter = DefaultFormatter
-    connection_name = "default"
-
-    def post(self, request, *args, **kwargs):
-        try:
-            params = request.data.get('params', {})
-            if request.data.get('connection'):
-                self.connection_name = request.data.get('connection')
-            # TODO: handle no query exception  here
-            user = request.data.get('user', None)
-            if request.data.get('parameters'):
-                self.parameters = request.data.get('parameters')
-                params = self.parse_params(params)
-            if request.data.get('validations'):
-                self.validations = request.data.get('validations')
-                self.run_validations(params, user)
-            self.query = request.data.get('config').get('query', '')
-            self.columns = request.data.get('columns')
-            # Execute the SQL Query, and return a Table
-            table = self._execute_query(params, user)
-            if request.data.get('transformations'):
-                # Perform basic transformations on the table
-                self.transformations = request.data.get('transformations', [])
-                table = self._run_transformations(table)
-
-            # Format the table according to the format requested
-            if request.data.get('format') not in ['table', 'JSON']:
-                self.format = request.data.get('format', 'SimpleFormatter')
-            data = self._format(table)
-            return Response(data, status.HTTP_200_OK)
+            if not database_response:
+                raise DatabaseConfigurationException('No databases found. Make sure that you have defined database url in the environment')
+            return Response({'databases': database_response})
         except Exception as e:
             return Response({'error': str(e)}, status.HTTP_400_BAD_REQUEST)
 
-    def get(self, request, *args, **kwargs):
-        # When this function is called, DRF has already done:
-        # 1. Authentication Checks
-        # 2. Permission Checks
-        # 3. Throttling
 
-        # First, validate the request parameters
-        # If validation fails, a sub-class of ApiException
-        # must be raised
-        params = request.GET.copy()
-        user = request.user
-        if hasattr(self, 'parameters'):
-            params = self.parse_params(params)
-        if hasattr(self, 'validations'):
-            self.run_validations(params, user)
+class DataProcessor(object):
 
-        # Execute the SQL Query, and return a Table
-        table = self._execute_query(params, user)
+    def fetch_chart_data(self, chart_url, params, user):
+        """
+        This method gets the chart data
+        """
+        chart_attributes = ['parameters', 'validations', 'transformations']
+        chart = Chart.objects.filter(url=chart_url).prefetch_related(*chart_attributes).first()
 
-        if hasattr(self, 'transformations'):
-            # Perform basic transformations on the table
-            table = self._run_transformations(table)
+        if not chart:
+            raise ChartNotFoundException('Chart with url - %s not found' % chart_url)
+
+        if not chart.database:
+            raise SelectedDatabaseException('Database is not selected')
+
+        return self._process_chart_query(chart, params, user)
+
+    def fetch_filter_data(self, filter_url, params, format_type, user):
+        """
+        Method to process the query and fetch the data for filter
+        """
+        filter_obj = Filter.objects.filter(url=filter_url).first()
+
+        if not filter_obj:
+            raise FilterNotFoundException('Filter with url - %s not found' % filter_url)
+
+        if not filter_obj.database:
+            raise SelectedDatabaseException('Database is not selected')
+
+        # Execute the Query, and return a Table
+        table = self._execute_query(params, user, filter_obj.query, filter_obj.database)
+        if format_type:
+            data = self._format(table, format_type)
+        else:
+            data = self._format(table, 'GoogleChartsFormatter')
+
+        return data
+
+    def _process_chart_query(self, chart, params, user):
+        """
+        Process and return the result after executing the chart query
+        """
+
+        # Parse Parameters
+        parameter_definitions = chart.parameters.all()
+        if parameter_definitions:
+            params = self._parse_params(params, parameter_definitions)
+
+        # Run Validations
+        validations = chart.validations.all()
+        if validations:
+            self._run_validations(params, user, validations, chart.database)
+
+        # Execute the Query, and return a Table
+        table = self._execute_query(params, user, chart.query, chart.database)
+
+        # Run Transformations
+        transformations = chart.transformations.all()
+        if transformations:
+            table = self._run_transformations(table, transformations)
 
         # Format the table according to google charts / highcharts etc
-        data = self._format(table)
+        data = self._format(table, chart.format)
 
-        # Return the response
-        return Response(data)
+        return data
 
-    # def validate_request(self, request):
-    #     for validation in self.validations:
-    #         validation.validate(request)
-
-    def _format(self, table):
-        if hasattr(self, 'format'):
-            if '.' in self.format:
-                module_name, class_name = self.format.rsplit('.',1)
-                module = importlib.import_module(module_name)
-                formatter = getattr(module, class_name)()
-            else:
-                formatter = eval(self.format)()
-            return formatter.format(table)
-        return SimpleFormatter().format(table)
-
-    def _run_transformations(self, table):
-        for transformation in self.transformations:
-            if '.' in transformation.get('name'):
-                module_name, class_name = self.format.rsplit('.',1)
-                module = importlib.import_module(module_name)
-                transformer_instance = getattr(module, class_name)()
-            else:
-                transformer_instance = eval(transformation.get('name', 'TableTransformer').title())()
-            kwargs = transformation.get("kwargs", {})
-            table = transformer_instance.transform(table, **kwargs)
-        return table
-
-    def run_validations(self, params, user):
-        for validation in self.validations:
-            validation_function = locate(validation.get("validation_function").get("name"))
-            kwargs = validation.get("validation_function").get("kwargs", {})
-            validation_function(self, params, user, **kwargs)
-
-    def parse_params(self, params):
-        for param in self.parameters:
+    def _parse_params(self, params, parameter_definitions):
+        for index, param in enumerate(parameter_definitions):
             # Default values
-            if self.parameters[param].get('default_value') and\
-               params.get(param) == None:
-                params[param] = self.parameters[param].get('default_value')
+            if param.default_value and \
+                    param.default_value!= '' and \
+                    params.get(param.name) in [None, '']:
+                params[param.name] = param.default_value
 
             # Check for missing required parameters
-            is_parameter_optional = self.parameters[param].get('optional',
-                                                               False)
-            if not is_parameter_optional and not params.get(param):
-                raise RequiredParameterMissingException("Parameter required: "+param)
+            mandatory = param.mandatory
+
+            if mandatory and params.get(param.name) is None:
+                raise RequiredParameterMissingException("Parameter required: " + param.name)
 
             # Formatting parameters
-            parameter_type_str = self.parameters[param].get("type", "String")
-            kwargs = self.parameters[param].get("kwargs", {})
-            if '.' in parameter_type_str:
-                module_name, class_name = parameter_type_str.rsplit('.', 1)
-                module = importlib.import_module(module_name)
-                parameter_type = getattr(module, class_name)
+            parameter_type_str = param.data_type
+
+            #FIXME: kwargs should not come as unicode. Need to debug the root cause and fix it.
+            if isinstance(param.kwargs, unicode):
+                kwargs = ast.literal_eval(param.kwargs)
             else:
-                parameter_type = eval(parameter_type_str.title())
-            if params.get(param):
-                params[param] = parameter_type(param, **kwargs).to_internal(params[param])
+                kwargs = param.kwargs
+
+            parameter_type = eval(parameter_type_str.title())
+            if params.get(param.name):
+                params[param.name] = parameter_type(param.name, **kwargs).to_internal(params[param.name])
         return params
 
-    def _execute_query(self, params, user):
-        query, bind_params = jinjasql.prepare_query(self.query,
+    def _run_validations(self, params, user, validations, db):
+        for validation in validations:
+            run_validation(params, user, validation.query, db)
+
+    def _check_read_only_query(self, query):
+        if any(keyword in query.upper() for keyword in SQL_WRITE_BLACKLIST):
+            raise DatabaseWriteException('Database write commands not permitted in the query.')
+        pass
+
+    def _execute_query(self, params, user, chart_query, db):
+        self._check_read_only_query(chart_query)
+        query, bind_params = jinjasql.prepare_query(chart_query,
                                                     {
                                                      "params": params,
                                                      "user": user
                                                     })
-        conn = connections[self.connection_name]
+        conn = connections[db]
+        if conn.settings_dict['NAME'] == 'Athena':
+            conn = connect(driver_path=os.path.join(os.path.dirname(os.path.abspath(__file__)), 'athena-jdbc/AthenaJDBC41-1.0.0.jar'))
         with conn.cursor() as cursor:
             cursor.execute(query, bind_params)
-            cols = []
             rows = []
-            for desc in cursor.description:
-                # if column definition is provided
-                if hasattr(self, 'columns') and self.columns.get(desc[0]):
-                    column = self.columns.get(desc[0])
-                    cols.append(
-                        Column(
-                           name=desc[0],
-                           data_type=column.get('data_type', 'string'),
-                           col_type=column.get('type', 'dimension')
-                        )
-                    )
-                else:
-                    cols.append(
-                        Column(name=desc[0],
-                               data_type='string', col_type='dimension')
-                    )
+            cols = [desc[0] for desc in cursor.description]
             for db_row in cursor:
                 row_list = []
-                for col_index, chart_col in enumerate(cols):
-                    value = db_row[col_index]
+                for col in db_row:
+                    value = col
                     if isinstance(value, str):
                         # If value contains a non english alphabet
                         value = value.encode('utf-8')
@@ -247,61 +191,364 @@ class SqlApiView(APIView):
                 rows.append(row_list)
         return Table(columns=cols, data=rows)
 
-    # def get_serializer(self, *args, **kwargs):
-    #     """
-    #     Return the serializer instance that should be used for validating and
-    #     deserializing input, and for serializing output.
-    #     """
-    #     serializer_class = self.get_serializer_class()
-    #     kwargs['context'] = self.get_serializer_context()
-    #     return serializer_class(*args, **kwargs)
+    def _format(self, table, format):
+        if format:
+            if format in ['table', 'json']:
+                formatter = SimpleFormatter()
+            else:
+                formatter = eval(format)()
+            return formatter.format(table)
+        return GoogleChartsFormatter().format(table)
 
-    # def get_serializer_class(self):
-    #     """
-    #     Return the class to use for the serializer.
-    #     Defaults to using `self.serializer_class`.
-    #     You may want to override this if you need to provide different
-    #     serializations depending on the incoming request.
-    #     (Eg. admins get full serialization, others get basic serialization)
-    #     """
-    #     assert self.serializer_class is not None, (
-    #         "'%s' should either include a `serializer_class` attribute, "
-    #         "or override the `get_serializer_class()` method."
-    #         % self.__class__.__name__
-    #     )
+    def _run_transformations(self, table, transformations):
+        try:
+            if transformations:
+                for transformation in transformations:
+                    transformer_instance = eval(transformation.get_name_display())()
+                    kwargs = transformation.kwargs
+                    table = transformer_instance.transform(table, **kwargs)
+                return table
+        except ValueError as e:
+            raise TransformationException("Error in transformation - " + e.message)
 
-    #     return self.serializer_class
-
-    # def get_serializer_context(self):
-    #     """
-    #     Extra context provided to the serializer class.
-    #     """
-    #     return {
-    #         'request': self.request,
-    #         'format': self.format_kwarg,
-    #         'view': self
-    #     }
-
-    # def transform(self, table, request):
-    #     """
-    #     table.columns = 1-d array describing the data
-    #     table.data = 2-d array
-
-    #     transormations = array of transformations
-    #     possible transformations:
-    #     1. transpose
-    #     2. split colulmn
-    #     3. combine columns
-    #     """
-    #     for transform in self.transformations:
-    #         func = transform["function"]
-    #         params = transform["params"]
-    #         table = func(table, **params)
-    #     return table
+        return table
 
 
-def squealy_interface(request):
+class ChartViewPermission(BasePermission):
+
+    def has_permission(self, request, view):
+        chart_url = request.resolver_match.kwargs.get('chart_url')
+        chart = Chart.objects.get(url=chart_url)
+        return request.user.has_perm('squealy.can_view_' + str(chart.id)) or request.user.has_perm('squealy.can_edit_' + str(chart.id))
+
+
+class ChartView(APIView):
+    permission_classes = [ChartViewPermission]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+
+    def get(self, request, chart_url=None, *args, **kwargs):
+        """
+        This is the API endpoint for executing the query and returning the data for a particular chart
+        """
+        params = request.GET.copy()
+        user = request.user
+        data = DataProcessor().fetch_chart_data(chart_url, params, user)
+        return Response(data)
+
+    def post(self, request, chart_url=None, *args, **kwargs):
+        """
+        This is the endpoint for running and testing queries from the authoring interface
+        """
+        try:
+            params = request.data.get('params', {})
+            user = request.data.get('user', None)
+            data = DataProcessor().fetch_chart_data(chart_url, params, user)
+            return Response(data)
+        except Exception as e:
+            return Response({'error': str(e)}, status.HTTP_400_BAD_REQUEST)
+
+
+class ChartUpdatePermission(BasePermission):
+
+    def has_permission(self, request, view):
+        if request.method == 'POST' and request.data.get('chart'):
+            chart_data = request.data['chart']
+            if chart_data.get('id'):
+                # Chart update
+                return request.user.has_perm('squealy.can_edit_' + str(chart_data['id']))
+            else:
+                # Adding new chart
+                return request.user.has_perm('squealy.add_chart')
+        elif request.method == 'DELETE' and request.data.get('id'):
+            # Delete chart
+            return request.user.has_perm('squealy.delete_chart')
+        return True
+
+
+class ChartsLoaderView(APIView):
+    permission_classes = [ChartUpdatePermission]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+
+    def get(self, request, *args, **kwargs):
+        permitted_charts = []
+        charts = Chart.objects.order_by('id').all()
+        for chart in charts:
+            if request.user.has_perm('squealy.can_edit_' + str(chart.id)):
+                chart_data = ChartSerializer(chart).data
+                chart_data['can_edit'] = True
+                permitted_charts.append(chart_data)
+            elif request.user.has_perm('squealy.can_view_' + str(chart.id)):
+                chart_data = ChartSerializer(chart).data
+                chart_data['can_edit'] = False
+                permitted_charts.append(chart_data)
+        return Response(permitted_charts)
+
+    def delete(self, request):
+        """
+        To delete a chart
+        """
+        data = request.data
+        chart = Chart.objects.filter(id=data['id']).first()
+        if not chart:
+            raise ChartNotFoundException('A chart with id ' + data['id'] + ' was not found')
+        Permission.objects.filter(codename__in=['can_view_' + str(chart.id), 'can_edit_' + str(chart.id)]).delete()
+        Chart.objects.filter(id=data['id']).first().delete()
+        return Response({})
+
+    def post(self, request):
+        """
+        To save or update chart objects
+        """
+        try:
+            data = request.data['chart']
+            chart_object = Chart(
+                            id=data['id'],
+                            name=data['name'],
+                            url=data['url'],
+                            query=data['query'],
+                            type=data['type'],
+                            options=data['options'],
+                            database=data['database']
+                        )
+            chart_object.save()
+
+            # Create view/edit permissions
+            content_type = ContentType.objects.get_for_model(Chart)
+
+            # View permission
+            perm_id = None
+            perm = Permission.objects.filter(codename='can_view_' + str(chart_object.id)).first()
+            if perm:
+                perm_id = perm.id
+
+            view_perm = Permission(
+                id=perm_id,
+                codename='can_view_' + str(chart_object.id),
+                name='Can view ' + chart_object.url,
+                content_type=content_type,
+            )
+            view_perm.save()
+
+            # Edit permission
+            perm_id = None
+            perm = Permission.objects.filter(codename='can_edit_' + str(chart_object.id)).first()
+            if perm:
+                perm_id = perm.id
+
+            edit_perm = Permission(
+                id=perm_id,
+                codename='can_edit_' + str(chart_object.id),
+                name='Can edit ' + chart_object.url,
+                content_type=content_type,
+            )
+            edit_perm.save()
+
+            request.user.user_permissions.add(view_perm)
+            request.user.user_permissions.add(edit_perm)
+            
+            chart_id = chart_object.id
+            Chart.objects.all().prefetch_related('transformations', 'parameters', 'validations')
+
+            # Parsing transformations
+            transformation_ids = []
+            transformation_objects = []
+            existing_transformations = {transformation.name: transformation.id
+                                        for transformation in chart_object.transformations.all()}
+
+            with transaction.atomic():
+                for transformation in data['transformations']:
+                    id = existing_transformations.get(transformation['name'], None)
+                    transformation_object = Transformation(id=id, name=transformation['name'],
+                                                           kwargs=transformation.get('kwargs', None),
+                                                           chart=chart_object)
+                    transformation_objects.append(transformation_object)
+                    transformation_object.save()
+                    transformation_ids.append(transformation_object.id)
+            Transformation.objects.filter(chart=chart_object).exclude(id__in=transformation_ids).all().delete()
+
+            # Parsing Parameters
+            parameter_ids = []
+            existing_parameters = {param.name: param.id
+                                   for param in chart_object.parameters.all()}
+            with transaction.atomic():
+                for parameter in data['parameters']:
+                    id = existing_parameters.get(parameter['name'], None)
+                    parameter_object = Parameter(id=id, name=parameter['name'], data_type=parameter['data_type'],
+                                                 mandatory=parameter['mandatory'],
+                                                 default_value=parameter['default_value'],
+                                                 test_value=parameter['test_value'], chart=chart_object,
+                                                 type=parameter['type'],
+                                                 dropdown_api=parameter['dropdown_api'],
+                                                 order=parameter['order'],
+                                                 is_parameterized=parameter['is_parameterized'],
+                                                 kwargs=parameter['kwargs'])
+                    parameter_object.save()
+                    parameter_ids.append(parameter_object.id)
+            Parameter.objects.filter(chart=chart_object).exclude(id__in=parameter_ids).all().delete()
+
+            # Parsing validations
+            validation_ids = []
+            existing_validations = {validation.name: validation.id
+                                    for validation in chart_object.validations.all()}
+            with transaction.atomic():
+                for validation in data['validations']:
+                    id = existing_validations.get(validation['name'], None)
+                    validation_object = Validation(id=id, query=validation['query'], name=validation['name'],
+                                                   chart=chart_object)
+                    validation_object.save()
+                    validation_ids.append(validation_object.id)
+            Validation.objects.filter(chart=chart_object).exclude(id__in=validation_ids).all().delete()
+
+        except KeyError as e:
+            raise MalformedChartDataException("Key Error - " + str(e.args))
+        except IntegrityError as e:
+            raise DuplicateUrlException('A chart with this name already exists')
+
+        return Response(chart_id, status.HTTP_200_OK)
+
+
+class UserInformation(APIView):
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+
+    def get(self, request):
+        response = {}
+        user = request.user
+        response['name'] = user.username
+        response['email'] = user.email
+        response['first_name'] = user.first_name
+        response['last_name'] = user.last_name
+        response['can_add_chart'] = user.has_perm('squealy.add_chart')
+        response['can_delete_chart'] = user.has_perm('squealy.delete_chart')
+        response['isAdmin'] = user.is_superuser
+        return Response(response)
+
+
+class FilterUpdatePermission(BasePermission):
     """
-    Renders the squealy authouring interface template
+    To check if user can add/edit/delete the filter
+    """
+    def has_permission(self, request, view):
+        if request.method == 'POST' and request.data.get('filter'):
+            filter_data = request.data['filter']
+            if filter_data.get('id'):
+                # Update the filter
+                return request.user.has_perm('squealy.can_edit_filter' + str(filter_data['id']))
+            else:
+                # Adding a new filter
+                return request.user.has_perm('squealy.add_filter')
+        elif request.method == 'DELETE' and request.data.get('id'):
+            # Delete current filter
+            return request.user.has_perm('squealy.delete_filter')
+        return True
+
+
+class FilterView(APIView):
+    permission_classes = [FilterUpdatePermission]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+
+    def get(self, request, filter_url=None, *args, **kwargs):
+        """
+        This is the API endpoint for executing the query and returning the data for a particular Filter
+        """
+        user = request.user
+        payload = request.GET.get("payload", None)
+        payload = json.loads(payload)
+        format_type = payload.get('format')
+        params = payload.get('params')
+        data = DataProcessor().fetch_filter_data(filter_url, params, format_type, user)
+        return Response(data)
+
+
+class FilterLoaderView(APIView):
+    permission_classes = [FilterUpdatePermission]
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+
+    def get(self, request, *args, **kwargs):
+        """
+        This a API point to return list of filters. If user has edit permissions, updating in the data.
+        """
+        permitted_filters = []
+        filters = Filter.objects.order_by('id').all()
+        for filter in filters:
+            filter_data = FilterSerializer(filter).data
+            if request.user.has_perm('squealy.can_edit_filter' + str(filter.id)):
+                filter_data['can_edit'] = True
+            permitted_filters.append(filter_data)
+
+        return Response(permitted_filters)
+
+    def delete(self, request):
+        """
+        To delete a filter
+        """
+        data = request.data
+        try:
+            chart = Filter.objects.filter(id=data['id']).first()
+            Permission.objects.filter(codename__in=['can_edit_filter' + str(chart.id)]).delete()
+            Filter.objects.filter(id=data['id']).first().delete()
+        except Exception:
+            FilterNotFoundException('A filter with id' + data['id'] + 'was not found')
+        return Response({})
+
+    def post(self, request):
+        """
+        To save or update chart objects
+        """
+        try:
+            data = request.data['filter']
+            filter_object = Filter(
+                            id=data['id'],
+                            name=data['name'],
+                            url=data['url'],
+                            query=data['query'],
+                            database=data['database']
+                        )
+            filter_object.save()
+
+            # Create edit permissions
+            content_type = ContentType.objects.get_for_model(Filter)
+
+            # Edit permission
+            perm_id = None
+            perm = Permission.objects.filter(codename='can_edit_filter' + str(filter_object.id)).first()
+            if perm:
+                perm_id = perm.id
+            Permission(
+                id=perm_id,
+                codename='can_edit_filter' + str(filter_object.id),
+                name='Can edit ' + filter_object.url,
+                content_type=content_type,
+            ).save()
+
+            filter_id = filter_object.id
+            Filter.objects.all().prefetch_related('parameters')
+
+            parameter_ids = []
+            existing_parameters = {param.name: param.id
+                                   for param in filter_object.parameters.all()}
+            with transaction.atomic():
+                for parameter in data['parameters']:
+                    id = existing_parameters.get(parameter['name'], None)
+                    parameter_object = FilterParameter(id=id,
+                                                 name=parameter['name'],
+                                                 default_value=parameter['default_value'],
+                                                 test_value=parameter['test_value'],
+                                                 filter=filter_object)
+                    parameter_object.save()
+                    parameter_ids.append(parameter_object.id)
+                FilterParameter.objects.filter(filter=filter_object).exclude(id__in=parameter_ids).all().delete()
+
+        except KeyError as e:
+            raise MalformedChartDataException("Key Error - " + str(e.args))
+        except IntegrityError as e:
+            raise DuplicateUrlException('A filter with this name already exists')
+
+        return Response(filter_id, status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+def squealy_interface(request, *args, **kwargs):
+    """
+    Renders the squealy authoring interface template
     """
     return render(request, 'index.html')

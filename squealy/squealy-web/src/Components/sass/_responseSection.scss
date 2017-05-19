@@ -1,3 +1,30 @@
+.chart-type-select {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+
+  >img {
+    height: 26px;
+    margin-left: 15px;
+  }
+}
+
+.chart-config-modal {
+  width: 70%;
+}
+
+.error-box {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 85px;
+  background: $warning-bg-color;
+  color: $red-color;
+  font-size: 17px;
+  font-family: Roboto Bold;
+  padding: 10px;
+}
+
 
 .response-formatwrapper{
   background-color: #f6f6f6;
@@ -13,6 +40,13 @@
     }
   }
 }
+
+.visualchart {
+  > .error-box {
+    margin-top: 50px;
+  }
+}
+
 
 .json-response-wrapper {
   max-height: 350px;
@@ -41,11 +75,45 @@
 }
 
 .response-section {
-  .response-section-btn {
-    background: $white_color;
-    border-radius: 3px;
-    margin: 0 7px 4px 0;
-    padding: 5px 18px;
-    outline: none;
+
+  #response-table {
+    height: 300px;
+    overflow-x: auto;
+    box-shadow: 0 4px 8px 0 $light_gray_color , 0 6px 33px 0 $light_gray_color ;
+
+    .table thead th {
+      border: 5px solid #fff;
+      margin-bottom: 10%;
+    }
+
+    .table tbody tr td {
+      color: #000;
+      background-color: $light_gray_color;
+      border: 5px solid #fff;
+      margin-top: 10%;
+      font-size: 13px;
+    }
+
+    #gc_response_header {
+      display: flex;
+      align-content: center;
+
+      .response-section-btn {
+        background: $white_color;
+        border-radius: 3px;
+        margin: 0 7px 4px 0;
+        padding: 6px 18px;
+        outline: none;
+      }
+
+      #chart_select {
+        display: inline-block;
+        width: 200px;
+      }
+    }
   }
+}
+
+.error {
+  padding-left: 15px;
 }
